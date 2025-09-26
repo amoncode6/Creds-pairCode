@@ -1,90 +1,111 @@
 const qrcode = require("qrcode-terminal")
 const fs = require('fs')
 const pino = require("pino")
-const { default: makeWASocket, Browsers, delay, useMultiFileAuthState, BufferJSON, fetchLatestBaileysVersion, PHONENUMBER_MCC, DisconnectReason, makeInMemoryStore, jidNormalizedUser, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys")
+const { default: makeWASocket, Browsers, delay, useMultiFileAuthState, fetchLatestBaileysVersion, PHONENUMBER_MCC, jidNormalizedUser, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys")
 const Pino = require("pino")
 const NodeCache = require("node-cache")
 const chalk = require("chalk")
 const readline = require("readline")
-const { parsePhoneNumber } = require("libphonenumber-js")
 
-let phoneNumber = "254711111111"
-
-const pairingCode = !!phoneNumber || process.argv.includes("--pairing-code")
+const pairingCode = process.argv.includes("--pairing-code")
 const useMobile = process.argv.includes("--mobile")
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-const question = (text) => new Promise((resolve) => rl.question(text, resolve))
+const rl = readline.createInterface({ 
+    input: process.stdin, 
+    output: process.stdout 
+})
+
+const question = (text) => {
+    if (rl.closed) {
+        console.log('Readline closed, cannot ask question')
+        process.exit(1)
+    }
+    return new Promise((resolve) => rl.question(text, resolve))
+}
 
 async function qr() {
-    //------------------------------------------------------
-    let { version, isLatest } = await fetchLatestBaileysVersion()
-    const { state, saveCreds } = await useMultiFileAuthState(`./sessions`)
-    const msgRetryCounterCache = new NodeCache() // for retry message, "waiting message"
-    const XeonBotInc = makeWASocket({
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: !pairingCode, // popping up QR in terminal log
-        browser: Browsers.windows('Firefox'), // for this issues https://github.com/WhiskeySockets/Baileys/issues/328
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
-        },
-        markOnlineOnConnect: true, // set false for offline
-        generateHighQualityLinkPreview: true, // make high preview link
-        getMessage: async (key) => {
-            let jid = jidNormalizedUser(key.remoteJid)
-            let msg = await store.loadMessage(jid, key.id)
+    try {
+        let { version, isLatest } = await fetchLatestBaileysVersion()
+        const { state, saveCreds } = await useMultiFileAuthState(`./sessions`)
+        const msgRetryCounterCache = new NodeCache()
+        
+        const XeonBotInc = makeWASocket({
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: !pairingCode,
+            browser: Browsers.windows('Firefox'),
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: "fatal" }).child({ level: "fatal" })),
+            },
+            markOnlineOnConnect: true,
+            generateHighQualityLinkPreview: true,
+            getMessage: async (key) => {
+                return ""
+            },
+            msgRetryCounterCache,
+            defaultQueryTimeoutMs: undefined,
+        })
 
-            return msg?.message || ""
-        },
-        msgRetryCounterCache, // Resolve waiting messages
-        defaultQueryTimeoutMs: undefined, // for this issues https://github.com/WhiskeySockets/Baileys/issues/276
-    })
+        // Pairing code logic
+        if (pairingCode && !XeonBotInc.authState.creds.registered) {
+            if (useMobile) throw new Error('Cannot use pairing code with mobile api')
 
-    // login use pairing code
-    // source code https://github.com/WhiskeySockets/Baileys/blob/master/Example/example.ts#L61
-    if (pairingCode && !XeonBotInc.authState.creds.registered) {
-        if (useMobile) throw new Error('Cannot use pairing code with mobile api')
-
-        let phoneNumber
-        if (!!phoneNumber) {
+            let phoneNumber = await question(chalk.bgBlack(chalk.greenBright(`Please type your WhatsApp number 😍\nFor example: +254711111111 : `)))
             phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
 
+            // Validate phone number
             if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) {
                 console.log(chalk.bgBlack(chalk.redBright("Start with country code of your WhatsApp Number, Example : +254711111111")))
-                process.exit(0)
-            }
-        } else {
-            phoneNumber = await question(chalk.bgBlack(chalk.greenBright(`Please type your WhatsApp number 😍\nFor example: +254711111111 : `)))
-            phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
-
-            // Ask again when entering the wrong number
-            if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) {
-                console.log(chalk.bgBlack(chalk.redBright("Start with country code of your WhatsApp Number, Example : +254711111111")))
-
+                
+                // Ask again with proper validation
                 phoneNumber = await question(chalk.bgBlack(chalk.greenBright(`Please type your WhatsApp number 😍\nFor example: +254711111111 : `)))
                 phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
-                // rl.close() removed from here to prevent ERR_USE_AFTER_CLOSE
+                
+                if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) {
+                    console.log(chalk.bgBlack(chalk.redBright("Invalid number format. Exiting...")))
+                    if (rl && !rl.closed) rl.close()
+                    process.exit(0)
+                }
             }
+
+            setTimeout(async () => {
+                try {
+                    let code = await XeonBotInc.requestPairingCode(phoneNumber)
+                    code = code?.match(/.{1,4}/g)?.join("-") || code
+                    console.log(chalk.black(chalk.bgGreen(`Mwtu-Md Pairing Code : `)), chalk.black(chalk.white(code)))
+                } catch (error) {
+                    console.log('Error getting pairing code:', error)
+                }
+            }, 3000)
         }
 
-        setTimeout(async () => {
-            let code = await XeonBotInc.requestPairingCode(phoneNumber)
-            code = code?.match(/.{1,4}/g)?.join("-") || code
-            console.log(chalk.black(chalk.bgGreen(`Mwtu-Md Pairing Code : `)), chalk.black(chalk.white(code)))
-        }, 3000)
-    }
-    //------------------------------------------------------
-    XeonBotInc.ev.on("connection.update", async (s) => {
-        const { connection, lastDisconnect } = s
-        if (connection == "open") {
-            await delay(1000 * 10)
-            await XeonBotInc.sendMessage(XeonBotInc.user.id, { text: `> *DEVICE SUCCESSFULLY LINKED*\n\n\n` });
-            let sessionXeon = fs.readFileSync('./sessions/creds.json');
-            await delay(1000 * 2)
-            const xeonses = await XeonBotInc.sendMessage(XeonBotInc.user.id, { document: sessionXeon, mimetype: `application/json`, fileName: `creds.json` })
-            XeonBotInc.groupAcceptInvite("W2d");
-            await XeonBotInc.sendMessage(XeonBotInc.user.id, { text: `> *ABOVE IS YOUR CREDS.JSON FILE.*
+        // Connection event handler
+        XeonBotInc.ev.on("connection.update", async (s) => {
+            const { connection, lastDisconnect } = s
+            
+            if (connection === "open") {
+                console.log('Connected successfully!')
+                await delay(1000 * 3)
+                
+                await XeonBotInc.sendMessage(XeonBotInc.user.id, { text: `> *DEVICE SUCCESSFULLY LINKED*\n\n\n` })
+                
+                let sessionXeon = fs.readFileSync('./sessions/creds.json')
+                await delay(1000 * 2)
+                
+                const xeonses = await XeonBotInc.sendMessage(XeonBotInc.user.id, { 
+                    document: sessionXeon, 
+                    mimetype: `application/json`, 
+                    fileName: `creds.json` 
+                })
+                
+                try {
+                    await XeonBotInc.groupAcceptInvite("W2d")
+                } catch (e) {
+                    console.log('Group invite error:', e)
+                }
+                
+                await XeonBotInc.sendMessage(XeonBotInc.user.id, { 
+                    text: `> *ABOVE IS YOUR CREDS.JSON FILE.*
 > *USE IT TO DEPLOY YOUR BOT.*
 ╔═════◇
 ║ 『••• 𝗩𝗶𝘀𝗶𝘁 𝗙𝗼𝗿 𝗛𝗲𝗹𝗽 •••
@@ -97,30 +118,40 @@ async function qr() {
  *MWTU-𝗠𝗗 𝗩2🫡🫡🫡*
 ___________________________
 - Don't Forget To Fork and Give a Star⭐ To My Repo.
-- Check Out the YouTube Channel Above for Tutorials.\n\n ` }, { quoted: xeonses });
-            await delay(1000 * 2)
-
-            // Properly close readline before exiting
-            if (rl && !rl.closed) {
-                rl.close()
+- Check Out the YouTube Channel Above for Tutorials.\n\n ` 
+                }, { quoted: xeonses })
+                
+                await delay(1000 * 2)
+                
+                // Close readline properly before exit
+                if (rl && !rl.closed) {
+                    rl.close()
+                }
+                console.log('Process completed successfully')
+                process.exit(0)
             }
-            process.exit(0)
+            
+            if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
+                console.log('Connection closed, restarting...')
+                setTimeout(qr, 5000)
+            }
+        })
+        
+        XeonBotInc.ev.on('creds.update', saveCreds)
+        XeonBotInc.ev.on("messages.upsert", () => { })
+        
+    } catch (error) {
+        console.log('Error in qr function:', error)
+        if (rl && !rl.closed) {
+            rl.close()
         }
-        if (
-            connection === "close" &&
-            lastDisconnect &&
-            lastDisconnect.error &&
-            lastDisconnect.error.output.statusCode != 401
-        ) {
-            qr()
-        }
-    })
-    XeonBotInc.ev.on('creds.update', saveCreds)
-    XeonBotInc.ev.on("messages.upsert", () => { })
+    }
 }
+
+// Start the application
 qr()
 
-// Proper cleanup handlers
+// Global error handlers
 process.on('beforeExit', () => {
     if (rl && !rl.closed) {
         rl.close()
@@ -128,6 +159,7 @@ process.on('beforeExit', () => {
 })
 
 process.on('SIGINT', () => {
+    console.log('Shutting down gracefully...')
     if (rl && !rl.closed) {
         rl.close()
     }
@@ -136,16 +168,14 @@ process.on('SIGINT', () => {
 
 process.on('uncaughtException', function (err) {
     let e = String(err)
-    if (e.includes("conflict")) return
-    if (e.includes("not-authorized")) return
-    if (e.includes("Socket connection timeout")) return
-    if (e.includes("rate-overlimit")) return
-    if (e.includes("Connection Closed")) return
-    if (e.includes("Timed Out")) return
-    if (e.includes("Value not found")) return
+    const ignorableErrors = [
+        "conflict", "not-authorized", "Socket connection timeout", 
+        "rate-overlimit", "Connection Closed", "Timed Out", "Value not found"
+    ]
+    
+    if (ignorableErrors.some(error => e.includes(error))) return
+    
     console.log('Caught exception: ', err)
-
-    // Close readline on uncaught exception
     if (rl && !rl.closed) {
         rl.close()
     }
